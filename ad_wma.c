@@ -31,7 +31,7 @@ static int _wma_open(struct ad_wma_priv *priv, sh_audio_t *ash)
     size_t extradata_size = ash->extradata_size;
 
     if (!(ash->block_align && sf_get_channel(sf) && sf_get_rate(sf) && sf_get_bit(sf) && ash->bps)) {
-        LOGE(TAG, "ash invalid. block_align = %u, bps = %u, sf=> %s", ash->block_align, ash->bps, sf_get_format(sf));
+        LOGE(TAG, "ash invalid. block_align = %u, bps = %u, sf=> %s", ash->block_align, ash->bps, sf_get_format_str(sf));
         return -1;
     }
 
@@ -86,35 +86,51 @@ err:
 static int _ad_wma_decode(ad_cls_t *o, avframe_t *frame, int *got_frame, const avpacket_t *pkt)
 {
     int rc = -1;
+    int64_t v;
     int32_t *psample;
-    int nb_samples, i;
     sf_t sf = o->ash.sf;
+    int nb_samples, i, total_samples = 0, first = 1;
     struct ad_wma_priv *priv = o->priv;
     mblock_t *omb            = priv->omb;
     WMADecodeContext *hdl    = &priv->wcxt;
 
     rc = wma_decode_superframe_init(hdl, pkt->data, pkt->len);
-    CHECK_RET_TAG_WITH_GOTO((rc > 0) && (hdl->nb_frames == 1), err);
+    CHECK_RET_TAG_WITH_GOTO((rc > 0) && (hdl->nb_frames > 0), err);
 
     rc = mblock_grow(omb, pkt->len * WMA_COMPRESS_RATIO_MAX);
     CHECK_RET_TAG_WITH_GOTO(rc == 0, err);
 
-    nb_samples = wma_decode_superframe_frame(hdl, omb->data, pkt->data, pkt->len);
-    CHECK_RET_TAG_WITH_GOTO(nb_samples > 0, err);
-    rc = nb_samples * sf_get_channel(sf);
+    for (i = 0; i < hdl->nb_frames; i++) {
+        nb_samples = wma_decode_superframe_frame(hdl, (int32_t*)((char*)omb->data + total_samples * sf_get_frame_size(sf)), pkt->data, pkt->len);
+        CHECK_RET_TAG_WITH_GOTO(nb_samples > 0, err);
+        total_samples += nb_samples;
+        if (first && hdl->nb_frames > 1) {
+            int new_msize = (nb_samples + 128) * hdl->nb_frames * sf_get_frame_size(sf);
+
+            rc = mblock_grow(omb, new_msize);
+            CHECK_RET_TAG_WITH_GOTO(rc == 0, err);
+            first = 0;
+        }
+    }
+
+    rc = total_samples * sf_get_channel(sf);
     psample = omb->data;
+    //FIXME: may be over flow
     for (i = 0; i < rc; i++) {
-        psample[i] <<= 2;
+        v          = (int64_t)psample[i] << 2;
+        v          = v < 0x7fffffff ? v : 0x7fffffff;
+        v          = v > -0x7fffffff ? v : -0x7fffffff;
+        psample[i] = v;
     }
 
     frame->sf         = sf;
-    frame->nb_samples = nb_samples;
+    frame->nb_samples = total_samples;
     rc = avframe_get_buffer(frame);
     if (rc < 0) {
-        LOGD(TAG, "avframe_get_buffer failed, may be oom. nb_samples = %d, sf=> %s", nb_samples, sf_get_format(sf));
+        LOGD(TAG, "avframe_get_buffer failed, may be oom. nb_samples = %d, sf=> %s", total_samples, sf_get_format_str(sf));
         goto err;
     }
-    memcpy((void*)frame->data[0], omb->data, nb_samples * sf_get_channel(sf) * (32 / 8));
+    memcpy((void*)frame->data[0], omb->data, total_samples * sf_get_frame_size(sf));
     *got_frame = 1;
 
     return pkt->len;

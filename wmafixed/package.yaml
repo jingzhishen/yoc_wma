@@ -94,7 +94,7 @@ depends:
 #     - libs                               #   -Llibs
 build_config:
   cflag: >
-    -Wno-unused-variable -Wno-pointer-sign -Wno-unused-but-set-variable
+    -g -O2 -Wno-unused-variable -Wno-pointer-sign -Wno-unused-but-set-variable
   include:
     - include
   internal_include:
